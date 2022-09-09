@@ -93,11 +93,13 @@ func (ts *testSystem) startServer(numTries int) error {
 		if ts.server == nil {
 			return errors.New("server returned by New() must not be nil")
 		}
+
 		port := 2000 + randGen.Intn(10000)
 		if err = ts.server.Start(port); err == nil {
 			ts.hostport = net.JoinHostPort("localhost", strconv.Itoa(port))
 			return nil
 		}
+
 		if ts.internal == nil {
 			return errors.New("db must be initialized after call to Start()")
 		}
@@ -530,6 +532,7 @@ func testBasic(t *testing.T, name string, numClients, numMessages, numDeletes, t
 	fmt.Printf("========== %s: %d client(s), %d Get, %d Delete requests each ==========\n", name, numClients, numMessages-numDeletes, numDeletes)
 
 	ts := newTestSystem(t)
+
 	if err := ts.startServer(startServerTries); err != nil {
 		t.Errorf("Failed to start server: %s\n", err)
 		return
@@ -540,7 +543,6 @@ func testBasic(t *testing.T, name string, numClients, numMessages, numDeletes, t
 		t.Error(err)
 		return
 	}
-
 	allClients := newTestClients(numClients, false)
 	if err := ts.startClients(allClients...); err != nil {
 		t.Errorf("Failed to start clients: %s\n", err)
