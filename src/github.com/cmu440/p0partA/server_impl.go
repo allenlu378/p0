@@ -5,7 +5,6 @@ package p0partA
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"net"
 	"strconv"
 
@@ -14,49 +13,160 @@ import (
 
 type keyValueServer struct {
 	// TODO: implement this!
-	req     chan []byte
-	active  chan int
-	dropped chan int
-	dict    kvstore.KVStore
+	active      []client
+	dropped     []client
+	getValue    chan []([]byte)
+	dict        kvstore.KVStore
+	serverStop  chan bool
+	messages    chan message
+	connections chan net.Conn
+	activeChan  chan int
+	droppedChan chan int
+	queries     chan query
+}
+type client struct {
+	connection     net.Conn
+	responseBuffer chan string
+	quit           chan int
+}
+
+type query struct {
+	queryType string
+	key       string
+	v1        []byte
+	v2        []byte
+}
+type message struct {
+	messClient client
+	content    string
 }
 
 // New creates and returns (but does not start) a new KeyValueServer.
-func New(store kvstore.KVStore) *keyValueServer {
+func New(store kvstore.KVStore) KeyValueServer {
 	// TODO: implement this!
-	fmt.Println("////////////////////////////////////////////////////////////////////////////////////////////////////////")
-	return &keyValueServer{
-		req:     make(chan []byte),
-		active:  make(chan int),
-		dropped: make(chan int),
-		dict:    store,
+	//fmt.Println("////////////////////////////////////////////////////////////////////////////////////////////////////////")
+	server := &keyValueServer{
+		active:      nil,
+		dropped:     nil,
+		getValue:    make(chan []([]byte)),
+		dict:        store,
+		serverStop:  make(chan bool),
+		messages:    make(chan message),
+		connections: make(chan net.Conn),
+		activeChan:  make(chan int),
+		droppedChan: make(chan int),
+		queries:     make(chan query),
 	}
+	return KeyValueServer(server)
 }
-
-func (kvs *keyValueServer) requestRoutine() {
-	fmt.Println("BACKGROUND")
+func (kvs *keyValueServer) writeClientBuffer(currClient client) {
 	for {
 		select {
-		case currRequest := <-kvs.req:
-			splitRequest := bytes.Split(currRequest, []byte(":"))
-			if bytes.Equal(splitRequest[0], []byte{'P', 'u', 't'}) {
-				fmt.Println("Put")
-				kvs.dict.Put(string(splitRequest[1]), splitRequest[2])
-			} else if bytes.Equal(splitRequest[0], []byte{'G', 'e', 't'}) {
-				fmt.Println("Get")
-				returnedVals := kvs.dict.Get(string(splitRequest[1]))
-				for _, v := range returnedVals {
-					fmt.Println(v)
-					// buffer := splitRequest[2]
-
-				}
-			} else if bytes.Equal(splitRequest[0], []byte{'D', 'e', 'l', 'e', 't', 'e'}) {
-				fmt.Println("Delete")
-				kvs.dict.Delete(string(splitRequest[1]))
-			} else if bytes.Equal(splitRequest[0], []byte{'U', 'p', 'd', 'a', 't', 'e'}) {
-				fmt.Println("Update")
-				kvs.dict.Update(string(splitRequest[1]), splitRequest[2], splitRequest[3])
+		case <-currClient.quit:
+			//fmt.Println("EXIT WRITE")
+			return
+		case clientMessage := <-currClient.responseBuffer:
+			_, err := currClient.connection.Write([]byte(clientMessage))
+			if err != nil {
+				//fmt.Println("ERROR IN READING OFF CLIENT BUFFER FOR CONNECTION:" + currClient.connection.LocalAddr().String())
 			}
 
+		}
+
+	}
+}
+func (kvs *keyValueServer) bgClientRead(currClient client) {
+	reader := bufio.NewReader(currClient.connection)
+	for {
+		select {
+		case <-currClient.quit:
+			//fmt.Println("EXIT READ")
+			return
+		default:
+			msg, e := reader.ReadBytes('\n')
+			if e == nil {
+				splitMessage := bytes.Split(msg[:len(msg)-1], []byte(":"))
+				if string(splitMessage[0]) == "Put" {
+					kvs.queries <- query{
+						key:       string(splitMessage[1]),
+						v1:        splitMessage[2],
+						queryType: "put",
+					}
+
+				} else if string(splitMessage[0]) == "Delete" {
+					kvs.queries <- query{
+						key:       string(splitMessage[1]),
+						queryType: "delete",
+					}
+
+				} else if string(splitMessage[0]) == "Update" {
+					kvs.queries <- query{
+						key:       string(splitMessage[1]),
+						v1:        splitMessage[2],
+						v2:        splitMessage[3],
+						queryType: "update",
+					}
+
+				} else if string(splitMessage[0]) == "Get" {
+					key := string(splitMessage[1])
+					// //fmt.Println("GETTTT")
+					kvs.queries <- query{
+						key:       key,
+						queryType: "get",
+					}
+					// //fmt.Println("WAIT FOR GETVALUE")
+					getValue := <-kvs.getValue
+					for _, returnValue := range getValue {
+
+						kvs.messages <- message{
+							messClient: currClient,
+							content:    key + ":" + string(returnValue) + "\n",
+						}
+					}
+
+				}
+			}
+		}
+
+	}
+}
+func (kvs *keyValueServer) bgRoutine() {
+	//fmt.Println("START BACKGROUND")
+	for {
+		select {
+		case <-kvs.serverStop:
+			//fmt.Println("FINISH")
+			for _, currClient := range kvs.active {
+				currClient.quit <- 0
+			}
+		case query := <-kvs.queries:
+			if query.queryType == "active" {
+				kvs.activeChan <- len(kvs.active)
+			} else if query.queryType == "drop" {
+				kvs.droppedChan <- len(kvs.dropped)
+			} else if query.queryType == "put" {
+				kvs.dict.Put(query.key, query.v1)
+			} else if query.queryType == "delete" {
+				kvs.dict.Delete(query.key)
+			} else if query.queryType == "update" {
+				kvs.dict.Update(query.key, query.v1, query.v2)
+			} else if query.queryType == "get" {
+				// fmt.Println("POP GET QUERY")
+				// fmt.Println(query.key)
+				// fmt.Println(kvs.dict)
+				returnedValues := kvs.dict.Get(query.key)
+				// fmt.Println(returnedValues)
+				kvs.getValue <- returnedValues
+			}
+		case conn := <-kvs.connections:
+			if conn != nil {
+				newClient := client{connection: conn, responseBuffer: make(chan string, 500)}
+				kvs.active = append(kvs.active, newClient)
+				go kvs.writeClientBuffer(newClient)
+				go kvs.bgClientRead(newClient)
+			}
+		case msg := <-kvs.messages:
+			msg.messClient.responseBuffer <- msg.content
 		}
 	}
 }
@@ -65,74 +175,54 @@ func (kvs *keyValueServer) Start(port int) error {
 	// TODO: implement this!
 	l, err := net.Listen("tcp", "localhost"+":"+strconv.Itoa(port))
 	if err != nil {
-		fmt.Println("Error listening:", err.Error())
+		//fmt.Println("Error listening:", err.Error())
 	}
 	// Close the listener when the application closes.
 	// defer l.Close()
-	fmt.Println("Listening on " + "localhost" + ":" + strconv.Itoa(port))
+	//fmt.Println("Listening on " + "localhost" + ":" + strconv.Itoa(port))
 
 	//Start background routine
-	go kvs.requestRoutine()
-	fmt.Println("AFTER BACKGROUND")
-	go checkConn(l, kvs)
-
-	return err
-}
-func checkConn(l net.Listener, kvs *keyValueServer) {
-	for {
-		fmt.Println("IN LOOP")
-		// Listen for an incoming connection.
-		conn, err := l.Accept()
-		if err != nil {
-			fmt.Println("Error accepting: ", err.Error())
+	go kvs.bgRoutine()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				//fmt.Println("Error accepting: ", err.Error())
+			}
+			kvs.connections <- conn
 		}
-		fmt.Println("SBIDB")
-		// Handle connections in a new goroutine.
-		go handleRequest(conn, kvs)
-	}
-}
+	}()
 
-func handleRequest(conn net.Conn, kvs *keyValueServer) {
-	fmt.Println("HANDLE")
-	// Make a buffer to hold incoming data.
-	// buf := make([]byte, 5000)
-	fmt.Println(len(kvs.active))
-
-	// fmt.Println(len(kvs.active))
-	// Read the incoming connection into the buffer.
-	fmt.Println("BEFORE READ")
-	reader := bufio.NewReader(conn)
-	fmt.Println(reader)
-	fmt.Println("AFTER READ")
-	// clientWriteChannel := make(chan []byte)
-	// buf = append(buf, []byte(":"+(&clientWriteChannel)...))
-	//Put message onto request channel
-	// kvs.req <- buf
-	kvs.active <- 0
-	fmt.Println(len(kvs.active))
-	fmt.Println("ENDDD")
-	// Send a response back to person contacting us.
-	// conn.Write([]byte("Message received.\n"))
-	// Close the connection when you're done with it.
-	// conn.Close()
+	return nil
 }
 
 func (kvs *keyValueServer) Close() {
-	fmt.Println("CLOSE")
+	//fmt.Println("CLOSE")
+	kvs.serverStop <- true
 	// TODO: implement this!
 }
 
 func (kvs *keyValueServer) CountActive() int {
 	// TODO: implement this!
-	fmt.Println("ACTIVE")
-	fmt.Println(len(kvs.active))
-	return len(kvs.active)
+	//fmt.Println("ACTIVE")
+	//fmt.Println(kvs.active)
+	kvs.queries <- query{
+		queryType: "active",
+	}
+	ans := <-kvs.activeChan
+	//fmt.Println(ans)
+	return ans
 }
 
 func (kvs *keyValueServer) CountDropped() int {
-	fmt.Println("DROP")
+	//fmt.Println("DROP")
 	// TODO: implement this!
-	return len(kvs.dropped)
+	kvs.queries <- query{
+		queryType: "dropped",
+	}
+	ans := <-kvs.droppedChan
+	//fmt.Println(ans)
+	return ans
 }
 
 // TODO: add additional methods/functions below!

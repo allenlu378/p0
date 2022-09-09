@@ -548,6 +548,7 @@ func testBasic(t *testing.T, name string, numClients, numMessages, numDeletes, t
 		t.Errorf("Failed to start clients: %s\n", err)
 		return
 	}
+
 	defer ts.killClients(allClients...)
 
 	// Give the server some time to register the clients before running the test.
